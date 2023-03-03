@@ -28,8 +28,8 @@ using OrdinaryDiffEq
 using Statistics
 using SparseArrays
 using ComponentArrays
-using PythonCall;
-plt = pyimport("matplotlib.pyplot");
+using PythonPlot
+# plt = pyimport("matplotlib.pyplot");
 
 #=
 Defining hyperparameters for the forward simulation of the model.
@@ -62,6 +62,23 @@ add_edge!(foodweb, 3 => 2) # P to C1
 add_edge!(foodweb, 3 => 5) # P to C2
 
 I, J, _ = findnz(adjacency_matrix(foodweb))
+
+#=
+For fun, let's just plot the 
+foodweb.
+=#
+using PythonCall
+nx = pyimport("networkx")
+np = pyimport("numpy")
+plt = pyimport("matplotlib.pyplot")
+species_colors = ["tab:red", "tab:green", "tab:blue", "tab:orange", "tab:purple"]
+
+g_nx = nx.DiGraph(np.array(adjacency_matrix(foodweb)))
+pos = Dict(0 => [0, 0], 1 => [1, 1], 2 => [2, 2], 3 => [4, 0], 4 => [3, 1])
+
+fig, axs = plt.subplots(1,2, figsize=(10,4))
+nx.draw(g_nx, pos, ax=axs[1], node_color=species_colors, node_size=1000)
+display(fig)
 
 #=
 The next several functions are required by `SimpleEcosystemModel` and define the
@@ -152,12 +169,17 @@ data = data .* exp.(0.1 * randn(size(data)))
 # plotting
 using PythonCall;
 plt = pyimport("matplotlib.pyplot");
-fig, ax = plt.subplots(1)
+ax = axs[0]
 for i in 1:N
-    ax.plot(data[i, :], label="Species $i")
+    ax.plot(data[i, :], label="Species $i", color = species_colors[i])
 end
 # ax.set_yscale("log")
+ax.set_ylabel("Species abundance")
+ax.set_xlabel("Time (days)")
+fig.set_facecolor("None")
+[ax.set_facecolor("None") for ax in axs]
 fig.legend()
+fig.savefig("time_series_5_species_ecosyste_model.png")
 display(fig)
 
 
