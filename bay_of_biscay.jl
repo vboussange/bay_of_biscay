@@ -67,17 +67,16 @@ I, J, _ = findnz(adjacency_matrix(foodweb))
 For fun, let's just plot the 
 foodweb.
 =#
-using PythonCall
+using PythonCall, PythonPlot
 nx = pyimport("networkx")
 np = pyimport("numpy")
-plt = pyimport("matplotlib.pyplot")
 species_colors = ["tab:red", "tab:green", "tab:blue", "tab:orange", "tab:purple"]
 
 g_nx = nx.DiGraph(np.array(adjacency_matrix(foodweb)))
 pos = Dict(0 => [0, 0], 1 => [1, 1], 2 => [2, 2], 3 => [4, 0], 4 => [3, 1])
 
-fig, axs = plt.subplots(1,2, figsize=(10,4))
-nx.draw(g_nx, pos, ax=axs[1], node_color=species_colors, node_size=1000)
+fig, ax = plt.subplots(1)
+nx.draw(g_nx, pos, ax=ax, node_color=species_colors, node_size=1000)
 display(fig)
 
 #=
@@ -125,10 +124,10 @@ end
 Defining ecosystem model parameters
 
 The parameters for the ecosystem model are defined using a `ComponentArray`. The
-u0_true variable specifies the initial conditions for the simulation. The
-ModelParams function from the ParametricModels package is used to specify the
-model parameters and simulation settings. Finally, the SimpleEcosystemModel
-function from the EcoEvoModelZoo package is used to define the ecosystem model.
+`u0_true` variable specifies the initial conditions for the simulation. The
+`ModelParams` type from the ParametricModels package is used to specify the
+model parameters and simulation settings. Finally, the `SimpleEcosystemModel`
+type from the EcoEvoModelZoo package is used to define the ecosystem model.
 =#
 
 p_true = ComponentArray(ω=[0.2],
@@ -163,81 +162,111 @@ model = SimpleEcosystemModel(; mp, intinsic_growth_rate,
     competition,
     resource_conversion_efficiency,
     feeding)
+
+#=
+Let's run the model! There is nothing more simple than that. Let's also plot it,
+to get a sense of what it looks like.
+=#
 data = simulate(model, u0=u0_true) |> Array
-data = data .* exp.(0.1 * randn(size(data)))
 
 # plotting
-using PythonCall;
-plt = pyimport("matplotlib.pyplot");
-ax = axs[0]
-for i in 1:N
-    ax.plot(data[i, :], label="Species $i", color = species_colors[i])
+using PythonPlot;
+function plot_time_series(data)
+    fig, ax = plt.subplots()
+    for i in 1:N
+        ax.plot(data[i, :], label="Species $i", color = species_colors[i])
+    end
+    # ax.set_yscale("log")
+    ax.set_ylabel("Species abundance")
+    ax.set_xlabel("Time (days)")
+    fig.set_facecolor("None")
+    [ax.set_facecolor("None") for ax in axs]
+    fig.legend()
+    return fig
 end
-# ax.set_yscale("log")
-ax.set_ylabel("Species abundance")
-ax.set_xlabel("Time (days)")
-fig.set_facecolor("None")
-[ax.set_facecolor("None") for ax in axs]
-fig.legend()
-fig.savefig("time_series_5_species_ecosyste_model.png")
-display(fig)
+
+display(plot_time_series(data))
 
 
+#=
+Now is the time to perform the inference! First, we generate noisy data by
+adding log normally distributed noise. 
+=#
+data = data .* exp.(0.1 * randn(size(data)))
 
-####################
-#### Inference #####
-####################
+display(plot_time_series(data))
+
+
+#=
+Then, we import the packages required for the inference. `PiecewiseInference` is
+the main package used, but we also need `OptimizationFlux` to use the `Adam`
+optimizer, and `SciMLSensitivity` to define the sensitivity method used to
+differentiate the ODE model
+=#
 using PiecewiseInference
-include("cb.jl") # to monitor losses and fit
-include("loss.jl") # provides log loss function
 using OptimizationFlux
 using SciMLSensitivity
 
-# hyperparameters for the inference process
-# adtype = Optimization.AutoForwardDiff()
-adtype = Optimization.AutoZygote()
-optimizers = [Adam(1e-2)]
-epochs = [1000]
-batchsizes = [3]
-group_size = 10 + 1 # number of points in each segment
-verbose = true
-info_per_its = 1
-plotting = true
+#=
+Next, we define the hyperparameters for the inference process, set up the
+inference problem, and run the optimization algorithm to estimate the
+parameters that fit the observed data. The callback function records the error
+after each iteration and plots the data and the model predictions if plotting is
+set to true.
+=#
+
+# We first need to define the inference problem with the model, the initial parameters, and the loss function.
 
 p_init = p_true
 p_init.ω .= 0.1 #
 
 loss_likelihood(data, pred, rg) = sum((data .- pred) .^ 2)# loss_fn_lognormal_distrib(data, pred, noise_distrib)
-# loss_u0_prior(u0_data, u0_pred) = loss_fn_lognormal_distrib(u0_data, u0_pred, u0_distrib)
-# loss_param_prior(p) = loss_param_prior_from_dict(p, prior_param_distrib)
 
-infprob = InferenceProblem(model,
-    p_init;
-    # loss_param_prior, 
-    # loss_u0_prior,
-    loss_likelihood
-)
+infprob = InferenceProblem(model, p_init; loss_likelihood)
 
-θs = []
+#=
+Next we define a call back funciton, that is, a function that is called after each iteration of the optimization process.
+It records the error and plots the data and the model predictions if the
+plotting variable is set to true.
+=#
 function callback(p_trained, losses, pred, ranges)
-    err = median([median(abs.((p_trained[k] - p_true[k]) ./ p_true[k])) for k in keys(p_true)])
-    push!(θs, err)
     if plotting && length(losses) % info_per_its == 0
         # print_param_values(re(p_trained), p_true)
         plotting_fit(losses, pred, ranges, data, tsteps)
     end
 end
 
+#=
+Finally, we use `piecewise_MLE`, the main function of PiecewiseInference that
+performs piecewise inference on the model to estimate the parameters that fit
+the observed data. It takes in the inference problem, the optimization
+algorithm, the batch size, the data, and the callback function.
+=#
+
 
 stats = @timed piecewise_MLE(infprob;
-    adtype,
-    group_size=group_size,
-    batchsizes=batchsizes,
-    data=data,
-    tsteps=tsteps,
-    optimizers=optimizers,
-    epochs=epochs,
-    verbose_loss=verbose,
-    info_per_its=info_per_its,
-    cb=callback
-)
+    adtype = Optimization.AutoZygote(),
+    group_size = 11,
+    batchsizes = [3],
+    data = data,
+    tsteps = tsteps,
+    optimizers = [Adam(1e-2)],
+    epochs = [1000],
+    verbose_loss = true,
+    info_per_its = 1,
+    cb = callback)
+
+#=
+In more details
+- `adtype` defines the automatic differentiation method to be used by
+PiecewiseInference to differentiate the model.
+- `optimizers` is a list of optimization algorithms used to optimize the parameters of the model. In this case, it is only using Adam with a learning rate of 1e-2. 
+- `epochs` is a list of the number of iterations for each optimization algorithm. 
+- `batchsizes` is a list of the number of data points to include in each mini-batch for training. 
+- `group_size` is the number of points in each segment for the piecewise inference method. 
+- `verbose` is a boolean value that determines whether to print out information about the training process or not. 
+- `info_per_its` is the frequency of iterations at which to print out information about the training process. 
+- `plotting` is a boolean value that determines whether to plot the data and the model predictions or not. 
+- `p_init` is the initial guess of the parameters of the model. 
+- `loss_likelihood` is a function that calculates the loss between the observed data and the predicted data. 
+=#
